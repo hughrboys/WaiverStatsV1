@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Waiver Analytics</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 20px; background-color: #f4f4f9; }
+        .container { max_width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h1 { margin-top: 0; color: #333; }
+        .section { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .section h3 { margin-top: 0; }
+        .row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
+        label { width: 150px; font-weight: bold; }
+        input[type="text"], input[type="number"] { padding: 5px; border: 1px solid #ccc; border-radius: 4px; }
+        .file-group { background: #fafafa; padding: 10px; border-left: 5px solid #ccc; margin-bottom: 10px; }
+        .blue-group { border-left-color: #4A90E2; }
+        .green-group { border-left-color: #50E3C2; }
+        button { background-color: #28a745; color: white; border: none; padding: 10px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; width: 100%; }
+        button:hover { background-color: #218838; }
+        #stats { white-space: pre-wrap; background: #eee; padding: 10px; border-radius: 5px; margin-top: 20px; font-family: monospace; }
+        canvas { margin-top: 20px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Waiver Analytics Tool</h1>
+
+    <div class="section">
+        <h3>1. Settings</h3>
+        <div class="row">
+            <label>Participants:</label>
+            <input type="number" id="participants" value="10">
+        </div>
+        <div class="row">
+            <label>Hours Operational:</label>
+            <input type="number" id="hours" placeholder="Calc. automatically">
+        </div>
+    </div>
+
+    <div class="section">
+        <h3>2. Upload Files</h3>
+        
+        <div class="file-group blue-group">
+            <div class="row">
+                <label>Blue Label:</label>
+                <input type="text" id="label1" value="Native">
+            </div>
+            <div class="row">
+                <label>Select CSV:</label>
+                <input type="file" id="file1" accept=".csv">
+            </div>
+        </div>
+
+        <div class="file-group green-group">
+            <div class="row">
+                <label>Green Label:</label>
+                <input type="text" id="label2" value="Local">
+            </div>
+            <div class="row">
+                <label>Select CSV:</label>
+                <input type="file" id="file2" accept=".csv">
+            </div>
+        </div>
+    </div>
+
+    <button onclick="processData()">Generate Graph & Stats</button>
+
+    <div id="stats"></div>
+    <canvas id="myChart"></canvas>
+</div>
+
+<script>
+    let chartInstance = null;
+
+    // Helper: Check if string has digits
+    function containsDigit(str) {
+        return /\d/.test(str);
+    }
+
+    // Helper: Parse Date "MM/DD/YYYY HH:MM:SS"
+    function parseDate(str) {
+        if(!str) return null;
+        const parts = str.split(' ');
+        if(parts.length < 2) return null;
+        const dateParts = parts[0].split('/');
+        const timeParts = parts[1].split(':');
+        if(dateParts.length < 3 || timeParts.length < 3) return null;
+        
+        // Month is 0-indexed in JS
+        return new Date(dateParts[2], dateParts[0]-1, dateParts[1], timeParts[0], timeParts[1], timeParts[2]);
+    }
+
+    // Helper: Round date down to 15 min
+    function floorTo15Min(date) {
+        const d = new Date(date);
+        const min = d.getMinutes();
+        const rem = min % 15;
+        d.setMinutes(min - rem);
+        d.setSeconds(0);
+        d.setMilliseconds(0);
+        return d;
+    }
+
+    // Main Processing Function
+    async function processData() {
+        const file1Input = document.getElementById('file1');
+        const file2Input = document.getElementById('file2');
+        const label1 = document.getElementById('label1').value || "Group 1";
+        const label2 = document.getElementById('label2').value || "Group 2";
+        
+        const p1 = file1Input.files[0] ? parseCSV(file1Input.files[0]) : Promise.resolve({rows:0, valid:0, intervals:{}, times:[]});
+        const p2 = file2Input.files[0] ? parseCSV(file2Input.files[0]) : Promise.resolve({rows:0, valid:0, intervals:{}, times:[]});
+
+        Promise.all([p1, p2]).then(results => {
+            const [d1, d2] = results;
+
+            if (d1.rows === 0 && d2.rows === 0) {
+                alert("Please upload at least one CSV file.");
+                return;
+            }
+
+            // 1. Calculate Hours (if not manually overridden)
+            const allTimes = [...d1.times, ...d2.times];
+            let hours = parseFloat(document.getElementById('hours').value);
+            
+            if (allTimes.length > 0) {
+                const minTime = new Date(Math.min(...allTimes));
+                const maxTime = new Date(Math.max(...allTimes));
+                const calcHours = (maxTime - minTime) / 1000 / 3600;
+                
+                // Only update input if user hasn't typed something custom or empty
+                if (!document.getElementById('hours').value) {
+                    document.getElementById('hours').value = calcHours.toFixed(2);
+                    hours = calcHours;
+                } else if(hours === 0) {
+                    hours = calcHours;
+                }
+            }
+
+            // 2. Calculate Dwell Time
+            const participants = parseInt(document.getElementById('participants').value) || 10;
+            const totalValid = d1.valid + d2.valid;
+            let dwellStr = "N/A";
+            
+            if (totalValid > 0 && hours > 0) {
+                const totalMins = (participants * hours * 60) / totalValid;
+                const m = Math.floor(totalMins);
+                const s = Math.round((totalMins - m) * 60);
+                dwellStr = `${m}m ${s}s`;
+            }
+
+            // 3. Update Text
+            const statsDiv = document.getElementById('stats');
+            statsDiv.innerText = 
+                `Total Waivers: ${d1.rows + d2.rows}\n` +
+                `Total Participants: ${totalValid}\n` +
+                `   - ${label1}: ${d1.valid}\n` +
+                `   - ${label2}: ${d2.valid}\n` +
+                `Dwell Time: ${dwellStr}`;
+
+            // 4. Render Chart
+            renderChart(d1.intervals, d2.intervals, label1, label2);
+        });
+    }
+
+    // CSV Parser Wrapper
+    function parseCSV(file) {
+        return new Promise((resolve) => {
+            Papa.parse(file, {
+                complete: function(results) {
+                    let totalRows = 0;
+                    let validCount = 0;
+                    let intervalDict = {};
+                    let rawTimes = [];
+
+                    // Skip header (row 0)
+                    for (let i = 1; i < results.data.length; i++) {
+                        const row = results.data[i];
+                        if (row.length < 1) continue;
+                        
+                        // Parse timestamp
+                        const dt = parseDate(row[0]);
+                        if (!dt) continue;
+
+                        totalRows++;
+                        rawTimes.push(dt.getTime());
+
+                        // Count participants in specific columns (3,5,7,9,11,13) -> index 3,5...
+                        let rowValid = 0;
+                        [3, 5, 7, 9, 11, 13].forEach(idx => {
+                            if (row[idx]) {
+                                const val = row[idx].trim();
+                                if (val && !containsDigit(val)) rowValid++;
+                            }
+                        });
+
+                        validCount += rowValid;
+
+                        // Binning
+                        const floored = floorTo15Min(dt).getTime();
+                        intervalDict[floored] = (intervalDict[floored] || 0) + rowValid;
+                    }
+                    resolve({rows: totalRows, valid: validCount, intervals: intervalDict, times: rawTimes});
+                }
+            });
+        });
+    }
+
+    function renderChart(dict1, dict2, label1, label2) {
+        const ctx = document.getElementById('myChart').getContext('2d');
+        
+        // Get all unique time keys
+        const keys = new Set([...Object.keys(dict1), ...Object.keys(dict2)]);
+        const sortedKeys = Array.from(keys).sort();
+
+        const labels = sortedKeys.map(k => {
+            const d = new Date(parseInt(k));
+            return d.getHours().toString().padStart(2,0) + ":" + d.getMinutes().toString().padStart(2,0);
+        });
+
+        const data1 = sortedKeys.map(k => dict1[k] || 0);
+        const data2 = sortedKeys.map(k => dict2[k] || 0);
+
+        if (chartInstance) chartInstance.destroy();
+
+        chartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: label1,
+                        data: data1,
+                        backgroundColor: '#4A90E2',
+                        stack: 'Stack 0',
+                    },
+                    {
+                        label: label2,
+                        data: data2,
+                        backgroundColor: '#50E3C2',
+                        stack: 'Stack 0',
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    x: { stacked: true, title: { display: true, text: 'Time (15-min intervals)' } },
+                    y: { stacked: true, title: { display: true, text: 'Number of Participants' } }
+                }
+            }
+        });
+    }
+</script>
+
+</body>
+</html>
