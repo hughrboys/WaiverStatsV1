@@ -26,7 +26,7 @@
         button { background-color: #28a745; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; width: 100%; margin-top: 10px; font-weight: bold;}
         button:hover { background-color: #218838; }
         
-        #stats { white-space: pre-wrap; background: #eee; padding: 10px; border-radius: 5px; margin-top: 20px; font-family: monospace; line-height: 1.5; }
+        #stats { white-space: pre-wrap; background: #eee; padding: 15px; border-radius: 5px; margin-top: 20px; font-family: monospace; line-height: 1.6; font-size: 14px; border: 1px solid #ccc;}
         canvas { margin-top: 20px; }
     </style>
 </head>
@@ -38,7 +38,7 @@
     <div class="section">
         <h3>1. Settings</h3>
         <div class="row">
-            <label>Participants:</label>
+            <label>Participants per Table:</label>
             <input type="number" id="participants" value="10">
         </div>
         <div class="row">
@@ -93,16 +93,13 @@
 
     <button onclick="processData()">Generate Graph & Stats</button>
 
-    <div id="stats"></div>
+    <div id="stats">upload files to see stats...</div>
     <canvas id="myChart"></canvas>
 </div>
 
 <script>
     let chartInstance = null;
-    // We store raw data here so we can re-filter without re-parsing CSVs
-    let cachedRawData1 = null; 
-    let cachedRawData2 = null;
-
+    
     // Helper: Check if string has digits
     function containsDigit(str) {
         return /\d/.test(str);
@@ -117,11 +114,10 @@
         const timeParts = parts[1].split(':');
         if(dateParts.length < 3 || timeParts.length < 3) return null;
         
-        // Month is 0-indexed in JS
         return new Date(dateParts[2], dateParts[0]-1, dateParts[1], timeParts[0], timeParts[1], timeParts[2]);
     }
 
-    // Helper: Format Date for display (MM/DD/YYYY HH:MM)
+    // Helper: Format Date for display
     function formatDateTime(dateObj) {
         const mm = (dateObj.getMonth() + 1).toString().padStart(2, '0');
         const dd = dateObj.getDate().toString().padStart(2, '0');
@@ -150,16 +146,15 @@
         return `${year}-${month}-${day}`;
     }
 
-    // Optional: Pre-fill date picker when file 1 is selected
+    // Pre-fill date picker when file is selected
     function previewFile(input) {
         if(input.files && input.files[0]) {
             Papa.parse(input.files[0], {
-                preview: 5, // Just peek at first 5 rows
+                preview: 5, 
                 complete: function(results) {
                     for(let i=1; i<results.data.length; i++){
                         const dt = parseDate(results.data[i][0]);
                         if(dt) {
-                            // Set the date picker to this date
                             document.getElementById('filterDate').value = getISODate(dt);
                             break;
                         }
@@ -175,8 +170,6 @@
         const file1Input = document.getElementById('file1');
         const file2Input = document.getElementById('file2');
         
-        // 1. Parse Files (or use cached)
-        // We always re-parse if file input has changed, simplified here to just parse every time for safety
         const p1 = file1Input.files[0] ? parseCSV(file1Input.files[0]) : Promise.resolve([]);
         const p2 = file2Input.files[0] ? parseCSV(file2Input.files[0]) : Promise.resolve([]);
 
@@ -195,7 +188,8 @@
 
             // Function to filter and bin data
             const processSet = (rawData) => {
-                let validCount = 0;
+                let validParticipants = 0;
+                let validWaivers = 0;
                 let intervalDict = {};
                 let filteredTimes = [];
 
@@ -203,19 +197,15 @@
                     const itemDateStr = getISODate(item.dt); // YYYY-MM-DD
 
                     // A. Filter by Date
-                    if (filterDate && itemDateStr !== filterDate) {
-                        return; // Skip this row
-                    }
+                    if (filterDate && itemDateStr !== filterDate) return;
 
-                    // B. Filter by Time (only if on the selected date or date is empty)
-                    // Construct Date objects for comparison
+                    // B. Filter by Time
                     if (filterStart) {
                         const [sh, sm] = filterStart.split(':');
                         const startLimit = new Date(item.dt);
                         startLimit.setHours(sh, sm, 0, 0);
                         if (item.dt < startLimit) return;
                     }
-
                     if (filterEnd) {
                         const [eh, em] = filterEnd.split(':');
                         const endLimit = new Date(item.dt);
@@ -223,16 +213,22 @@
                         if (item.dt > endLimit) return;
                     }
 
-                    // If we pass filters, add to stats
-                    validCount += item.count;
+                    // If we pass filters:
+                    validWaivers++;                 // Count the waiver (row)
+                    validParticipants += item.count; // Count people on it
                     filteredTimes.push(item.dt.getTime());
 
-                    // Binning
+                    // Binning (Using participant count for the graph height)
                     const floored = floorTo15Min(item.dt).getTime();
                     intervalDict[floored] = (intervalDict[floored] || 0) + item.count;
                 });
 
-                return { valid: validCount, intervals: intervalDict, times: filteredTimes, totalRows: filteredTimes.length };
+                return { 
+                    participants: validParticipants, 
+                    waivers: validWaivers, 
+                    intervals: intervalDict, 
+                    times: filteredTimes 
+                };
             };
 
             const d1 = processSet(raw1);
@@ -247,9 +243,6 @@
                 const minTime = new Date(Math.min(...allTimes));
                 const maxTime = new Date(Math.max(...allTimes));
                 
-                // Add 15 mins to the max time to account for the full duration of the last bin
-                // (Optional, but usually "Hours Operational" implies the full block)
-                // For dwell time calc, pure difference is usually standard.
                 const calcHours = (maxTime - minTime) / 1000 / 3600;
 
                 // Update hours input
@@ -272,12 +265,13 @@
             }
 
             // 4. Calculate Dwell Time
-            const participants = parseInt(document.getElementById('participants').value) || 10;
-            const totalValid = d1.valid + d2.valid;
+            const participantsPerTable = parseInt(document.getElementById('participants').value) || 10;
+            const totalParticipants = d1.participants + d2.participants;
+            const totalWaivers = d1.waivers + d2.waivers;
             let dwellStr = "N/A";
             
-            if (totalValid > 0 && hours > 0) {
-                const totalMins = (participants * hours * 60) / totalValid;
+            if (totalParticipants > 0 && hours > 0) {
+                const totalMins = (participantsPerTable * hours * 60) / totalParticipants;
                 const m = Math.floor(totalMins);
                 const s = Math.round((totalMins - m) * 60);
                 dwellStr = `${m}m ${s}s`;
@@ -286,21 +280,32 @@
             // 5. Update Text Stats
             const label1 = document.getElementById('label1').value || "Group 1";
             const label2 = document.getElementById('label2').value || "Group 2";
+            
+            // Calculate Average Group Size
+            let avgGroupSize = "0";
+            if (totalWaivers > 0) {
+                avgGroupSize = (totalParticipants / totalWaivers).toFixed(2);
+            }
 
             const statsDiv = document.getElementById('stats');
             statsDiv.innerText = 
-                `Time Window Analyzed: ${hours.toFixed(2)} hours\n` +
-                `Total Participants (in window): ${totalValid}\n` +
-                `   - ${label1}: ${d1.valid}\n` +
-                `   - ${label2}: ${d2.valid}\n` +
-                `Dwell Time: ${dwellStr}`;
+                `Time Window Analyzed:   ${hours.toFixed(2)} hours\n` +
+                `----------------------------------------\n` +
+                `TOTAL WAIVERS SIGNED:   ${totalWaivers}\n` +
+                `TOTAL PARTICIPANTS:     ${totalParticipants}\n` +
+                `Avg Participants/Waiver: ${avgGroupSize}\n` +
+                `----------------------------------------\n` +
+                `Breakdown by Group:\n` +
+                `   - ${label1}: ${d1.waivers} waivers / ${d1.participants} participants\n` +
+                `   - ${label2}: ${d2.waivers} waivers / ${d2.participants} participants\n` +
+                `----------------------------------------\n` +
+                `Calculated Dwell Time:  ${dwellStr}`;
 
             // 6. Render Chart
             renderChart(d1.intervals, d2.intervals, label1, label2, titleLines);
         });
     }
 
-    // Modified CSV Parser: Returns RAW data (List of Objects), does NOT bin yet
     function parseCSV(file) {
         return new Promise((resolve) => {
             Papa.parse(file, {
@@ -315,7 +320,7 @@
                         const dt = parseDate(row[0]);
                         if (!dt) continue;
 
-                        // Count participants
+                        // Count participants in specific columns
                         let rowValid = 0;
                         [3, 5, 7, 9, 11, 13].forEach(idx => {
                             if (row[idx]) {
@@ -324,9 +329,9 @@
                             }
                         });
 
-                        if (rowValid > 0) {
-                            rawData.push({ dt: dt, count: rowValid });
-                        }
+                        // We store the row even if 0 participants, 
+                        // because it counts as a waiver signed (timestamp exists)
+                        rawData.push({ dt: dt, count: rowValid });
                     }
                     resolve(rawData);
                 }
@@ -337,7 +342,6 @@
     function renderChart(dict1, dict2, label1, label2, titleArray) {
         const ctx = document.getElementById('myChart').getContext('2d');
         
-        // Get all unique time keys
         const keys = new Set([...Object.keys(dict1), ...Object.keys(dict2)]);
         const sortedKeys = Array.from(keys).sort();
 
