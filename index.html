@@ -13,8 +13,8 @@
         .section { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
         .section h3 { margin-top: 0; }
         .row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
-        label { width: 150px; font-weight: bold; }
-        input[type="text"], input[type="number"] { padding: 5px; border: 1px solid #ccc; border-radius: 4px; }
+        label { width: 160px; font-weight: bold; }
+        input[type="text"], input[type="number"], input[type="time"] { padding: 5px; border: 1px solid #ccc; border-radius: 4px; }
         .file-group { background: #fafafa; padding: 10px; border-left: 5px solid #ccc; margin-bottom: 10px; }
         .blue-group { border-left-color: #4A90E2; }
         .green-group { border-left-color: #50E3C2; }
@@ -30,14 +30,23 @@
     <h1>Waiver Analytics Tool</h1>
 
     <div class="section">
-        <h3>1. Settings</h3>
+        <h3>1. Settings & Filters</h3>
         <div class="row">
             <label>Participants:</label>
-            <input type="number" id="participants" value="10">
+            <input type="number" id="participants" value="10" style="width: 60px;">
+        </div>
+        <div class="row">
+            <label>Filter Start Time:</label>
+            <input type="time" id="filterStart">
+            <span style="font-size: 0.8em; color: gray;">(Leave empty to auto-detect)</span>
+        </div>
+        <div class="row">
+            <label>Filter End Time:</label>
+            <input type="time" id="filterEnd">
         </div>
         <div class="row">
             <label>Hours Operational:</label>
-            <input type="number" id="hours" placeholder="Calc. automatically">
+            <input type="number" id="hours" placeholder="Calculated from filter">
         </div>
     </div>
 
@@ -76,12 +85,8 @@
 <script>
     let chartInstance = null;
 
-    // Helper: Check if string has digits
-    function containsDigit(str) {
-        return /\d/.test(str);
-    }
+    function containsDigit(str) { return /\d/.test(str); }
 
-    // Helper: Parse Date "MM/DD/YYYY HH:MM:SS"
     function parseDate(str) {
         if(!str) return null;
         const parts = str.split(' ');
@@ -89,12 +94,9 @@
         const dateParts = parts[0].split('/');
         const timeParts = parts[1].split(':');
         if(dateParts.length < 3 || timeParts.length < 3) return null;
-        
-        // Month is 0-indexed in JS
         return new Date(dateParts[2], dateParts[0]-1, dateParts[1], timeParts[0], timeParts[1], timeParts[2]);
     }
 
-    // Helper: Format Date for display (MM/DD/YYYY HH:MM)
     function formatDateTime(dateObj) {
         const mm = (dateObj.getMonth() + 1).toString().padStart(2, '0');
         const dd = dateObj.getDate().toString().padStart(2, '0');
@@ -104,7 +106,12 @@
         return `${mm}/${dd}/${yyyy} ${hh}:${min}`;
     }
 
-    // Helper: Round date down to 15 min
+    function formatTimeOnly(dateObj) {
+        const hh = dateObj.getHours().toString().padStart(2, '0');
+        const min = dateObj.getMinutes().toString().padStart(2, '0');
+        return `${hh}:${min}`;
+    }
+
     function floorTo15Min(date) {
         const d = new Date(date);
         const min = d.getMinutes();
@@ -115,7 +122,17 @@
         return d;
     }
 
-    // Main Processing Function
+    // Helper to merge a specific HH:MM string into a base Date object
+    function applyTimeFilter(baseDate, timeStr) {
+        if (!timeStr) return null;
+        const parts = timeStr.split(':');
+        const d = new Date(baseDate);
+        d.setHours(parseInt(parts[0]));
+        d.setMinutes(parseInt(parts[1]));
+        d.setSeconds(0);
+        return d;
+    }
+
     async function processData() {
         const file1Input = document.getElementById('file1');
         const file2Input = document.getElementById('file2');
@@ -133,71 +150,86 @@
                 return;
             }
 
-            // 1. Calculate Hours (if not manually overridden)
+            // --- 1. Determine Global Range & Handle Filters ---
             const allTimes = [...d1.times, ...d2.times];
-            let hours = parseFloat(document.getElementById('hours').value);
+            if (allTimes.length === 0) return;
+
+            const globalMin = new Date(Math.min(...allTimes));
+            const globalMax = new Date(Math.max(...allTimes));
+
+            // UI Elements
+            const filterStartInput = document.getElementById('filterStart');
+            const filterEndInput = document.getElementById('filterEnd');
+            const hoursInput = document.getElementById('hours');
+
+            // If inputs are empty, auto-fill them with global min/max
+            if (!filterStartInput.value) filterStartInput.value = formatTimeOnly(globalMin);
+            if (!filterEndInput.value) filterEndInput.value = formatTimeOnly(globalMax);
+
+            // Create Date objects for the Filter boundaries
+            // We use the date from globalMin to ensure the date part matches the data
+            const filterStartDt = applyTimeFilter(globalMin, filterStartInput.value);
+            const filterEndDt = applyTimeFilter(globalMin, filterEndInput.value);
+
+            // --- 2. Filter the Data ---
+            // Combine all keys, sort them, then filter out ones outside the range
+            const allKeys = new Set([...Object.keys(d1.intervals), ...Object.keys(d2.intervals)]);
+            let sortedKeys = Array.from(allKeys).sort();
+
+            // Apply Filter
+            sortedKeys = sortedKeys.filter(k => {
+                const t = parseInt(k);
+                return t >= filterStartDt.getTime() && t <= filterEndDt.getTime();
+            });
+
+            // Recalculate Totals based on Filtered Keys
+            let filteredValid1 = 0;
+            let filteredValid2 = 0;
+            sortedKeys.forEach(k => {
+                filteredValid1 += (d1.intervals[k] || 0);
+                filteredValid2 += (d2.intervals[k] || 0);
+            });
+            const totalFilteredValid = filteredValid1 + filteredValid2;
+
+            // --- 3. Calculate Hours Operational based on Filter ---
+            const calcHours = (filterEndDt - filterStartDt) / 1000 / 3600;
+            hoursInput.value = calcHours.toFixed(2);
+
+            // --- 4. Chart Title Data ---
+            let filename = "";
+            if (file1Input.files[0]) filename = file1Input.files[0].name;
+            else if (file2Input.files[0]) filename = file2Input.files[0].name;
             
-            // Variables for chart title
-            let titleLines = [];
+            const raceName = filename.split(" - ")[0] || "Combined Analytics";
+            const dayName = globalMin.toLocaleDateString('en-US', { weekday: 'long' });
+            const timeFrameStr = `Time frame: ${formatDateTime(filterStartDt)} - ${formatDateTime(filterEndDt)}`;
+            const titleLines = [raceName, dayName, timeFrameStr];
 
-            if (allTimes.length > 0) {
-                const minTime = new Date(Math.min(...allTimes));
-                const maxTime = new Date(Math.max(...allTimes));
-                const calcHours = (maxTime - minTime) / 1000 / 3600;
-                
-                // Only update input if user hasn't typed something custom or empty
-                if (!document.getElementById('hours').value) {
-                    document.getElementById('hours').value = calcHours.toFixed(2);
-                    hours = calcHours;
-                } else if(hours === 0) {
-                    hours = calcHours;
-                }
-
-                // --- Generate Title Data ---
-                // 1. Extract Prefix (Race Name) from filename
-                let filename = "";
-                if (file1Input.files[0]) filename = file1Input.files[0].name;
-                else if (file2Input.files[0]) filename = file2Input.files[0].name;
-                
-                // Logic: Split by " - " and take the first part
-                const raceName = filename.split(" - ")[0] || "Combined Analytics";
-                
-                // 2. Day of Week
-                const dayName = minTime.toLocaleDateString('en-US', { weekday: 'long' });
-
-                // 3. Time Frame String
-                const timeFrameStr = `Time frame: ${formatDateTime(minTime)} - ${formatDateTime(maxTime)}`;
-
-                titleLines = [raceName, dayName, timeFrameStr];
-            }
-
-            // 2. Calculate Dwell Time
+            // --- 5. Dwell Time ---
             const participants = parseInt(document.getElementById('participants').value) || 10;
-            const totalValid = d1.valid + d2.valid;
             let dwellStr = "N/A";
             
-            if (totalValid > 0 && hours > 0) {
-                const totalMins = (participants * hours * 60) / totalValid;
+            if (totalFilteredValid > 0 && calcHours > 0) {
+                const totalMins = (participants * calcHours * 60) / totalFilteredValid;
                 const m = Math.floor(totalMins);
                 const s = Math.round((totalMins - m) * 60);
                 dwellStr = `${m}m ${s}s`;
             }
 
-            // 3. Update Text
+            // --- 6. Update Text ---
             const statsDiv = document.getElementById('stats');
             statsDiv.innerText = 
-                `Total Waivers: ${d1.rows + d2.rows}\n` +
-                `Total Participants: ${totalValid}\n` +
-                `   - ${label1}: ${d1.valid}\n` +
-                `   - ${label2}: ${d2.valid}\n` +
+                `Total Participants (in filtered time): ${totalFilteredValid}\n` +
+                `   - ${label1}: ${filteredValid1}\n` +
+                `   - ${label2}: ${filteredValid2}\n` +
+                `Hours Operational: ${calcHours.toFixed(2)}\n` +
                 `Dwell Time: ${dwellStr}`;
 
-            // 4. Render Chart with Title
-            renderChart(d1.intervals, d2.intervals, label1, label2, titleLines);
+            // --- 7. Render Chart ---
+            renderChart(d1.intervals, d2.intervals, sortedKeys, label1, label2, titleLines);
         });
     }
 
-    // CSV Parser Wrapper
     function parseCSV(file) {
         return new Promise((resolve) => {
             Papa.parse(file, {
@@ -207,19 +239,16 @@
                     let intervalDict = {};
                     let rawTimes = [];
 
-                    // Skip header (row 0)
                     for (let i = 1; i < results.data.length; i++) {
                         const row = results.data[i];
                         if (row.length < 1) continue;
                         
-                        // Parse timestamp
                         const dt = parseDate(row[0]);
                         if (!dt) continue;
 
                         totalRows++;
                         rawTimes.push(dt.getTime());
 
-                        // Count participants in specific columns (3,5,7,9,11,13) -> index 3,5...
                         let rowValid = 0;
                         [3, 5, 7, 9, 11, 13].forEach(idx => {
                             if (row[idx]) {
@@ -230,7 +259,6 @@
 
                         validCount += rowValid;
 
-                        // Binning
                         const floored = floorTo15Min(dt).getTime();
                         intervalDict[floored] = (intervalDict[floored] || 0) + rowValid;
                     }
@@ -240,13 +268,10 @@
         });
     }
 
-    function renderChart(dict1, dict2, label1, label2, titleArray) {
+    function renderChart(dict1, dict2, sortedKeys, label1, label2, titleArray) {
         const ctx = document.getElementById('myChart').getContext('2d');
         
-        // Get all unique time keys
-        const keys = new Set([...Object.keys(dict1), ...Object.keys(dict2)]);
-        const sortedKeys = Array.from(keys).sort();
-
+        // We now use the sortedKeys that have already been filtered in processData
         const labels = sortedKeys.map(k => {
             const d = new Date(parseInt(k));
             return d.getHours().toString().padStart(2,0) + ":" + d.getMinutes().toString().padStart(2,0);
@@ -281,19 +306,12 @@
                 plugins: {
                     title: {
                         display: true,
-                        text: titleArray, // Array creates multi-line title
-                        font: {
-                            size: 16
-                        },
-                        padding: {
-                            top: 10,
-                            bottom: 20
-                        },
+                        text: titleArray,
+                        font: { size: 16 },
+                        padding: { top: 10, bottom: 20 },
                         color: '#333'
                     },
-                    legend: {
-                        position: 'top'
-                    }
+                    legend: { position: 'top' }
                 },
                 scales: {
                     x: { stacked: true, title: { display: true, text: 'Time (15-min intervals)' } },
