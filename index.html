@@ -94,6 +94,16 @@
         return new Date(dateParts[2], dateParts[0]-1, dateParts[1], timeParts[0], timeParts[1], timeParts[2]);
     }
 
+    // Helper: Format Date for display (MM/DD/YYYY HH:MM)
+    function formatDateTime(dateObj) {
+        const mm = (dateObj.getMonth() + 1).toString().padStart(2, '0');
+        const dd = dateObj.getDate().toString().padStart(2, '0');
+        const yyyy = dateObj.getFullYear();
+        const hh = dateObj.getHours().toString().padStart(2, '0');
+        const min = dateObj.getMinutes().toString().padStart(2, '0');
+        return `${mm}/${dd}/${yyyy} ${hh}:${min}`;
+    }
+
     // Helper: Round date down to 15 min
     function floorTo15Min(date) {
         const d = new Date(date);
@@ -127,6 +137,9 @@
             const allTimes = [...d1.times, ...d2.times];
             let hours = parseFloat(document.getElementById('hours').value);
             
+            // Variables for chart title
+            let titleLines = [];
+
             if (allTimes.length > 0) {
                 const minTime = new Date(Math.min(...allTimes));
                 const maxTime = new Date(Math.max(...allTimes));
@@ -139,6 +152,23 @@
                 } else if(hours === 0) {
                     hours = calcHours;
                 }
+
+                // --- Generate Title Data ---
+                // 1. Extract Prefix (Race Name) from filename
+                let filename = "";
+                if (file1Input.files[0]) filename = file1Input.files[0].name;
+                else if (file2Input.files[0]) filename = file2Input.files[0].name;
+                
+                // Logic: Split by " - " and take the first part
+                const raceName = filename.split(" - ")[0] || "Combined Analytics";
+                
+                // 2. Day of Week
+                const dayName = minTime.toLocaleDateString('en-US', { weekday: 'long' });
+
+                // 3. Time Frame String
+                const timeFrameStr = `Time frame: ${formatDateTime(minTime)} - ${formatDateTime(maxTime)}`;
+
+                titleLines = [raceName, dayName, timeFrameStr];
             }
 
             // 2. Calculate Dwell Time
@@ -162,8 +192,8 @@
                 `   - ${label2}: ${d2.valid}\n` +
                 `Dwell Time: ${dwellStr}`;
 
-            // 4. Render Chart
-            renderChart(d1.intervals, d2.intervals, label1, label2);
+            // 4. Render Chart with Title
+            renderChart(d1.intervals, d2.intervals, label1, label2, titleLines);
         });
     }
 
@@ -210,7 +240,7 @@
         });
     }
 
-    function renderChart(dict1, dict2, label1, label2) {
+    function renderChart(dict1, dict2, label1, label2, titleArray) {
         const ctx = document.getElementById('myChart').getContext('2d');
         
         // Get all unique time keys
@@ -248,6 +278,23 @@
             },
             options: {
                 responsive: true,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: titleArray, // Array creates multi-line title
+                        font: {
+                            size: 16
+                        },
+                        padding: {
+                            top: 10,
+                            bottom: 20
+                        },
+                        color: '#333'
+                    },
+                    legend: {
+                        position: 'top'
+                    }
+                },
                 scales: {
                     x: { stacked: true, title: { display: true, text: 'Time (15-min intervals)' } },
                     y: { stacked: true, title: { display: true, text: 'Number of Participants' } }
